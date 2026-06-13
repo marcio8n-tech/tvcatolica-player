@@ -6,12 +6,13 @@
 
     <application
         android:allowBackup="false"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:label="TV Católica HD"
         android:theme="@style/AppTheme_Fullscreen">
 
         <activity
-            android:name="com.tvcatolica.player.PlayerActivity"
+            android:name="com.tvcatolica.exoplayer.PlayerActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true"
             android:launchMode="singleInstance"
