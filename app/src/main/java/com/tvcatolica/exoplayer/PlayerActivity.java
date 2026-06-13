@@ -28,32 +28,27 @@ import androidx.media3.exoplayer.hls.HlsMediaSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.ui.PlayerView;
-import java.util.ArrayList;
-import java.util.List;
 
 @OptIn(markerClass = UnstableApi.class)
 public class PlayerActivity extends Activity {
 
-    // ── Constantes (equivalentes às do APK original) ──────────
-    private static final long KEEPALIVE_MS       = 25000;
-    private static final long PREPARE_TIMEOUT_MS = 18000;
-    private static final long PRE_BUFFER_DELAY_MS= 5000;
-    private static final int  MAX_RETRY          = 10;
-    private static final long UI_HIDE_MS         = 5000;
-    private static final int  TIMEOUT_MS         = 10000;
+    private static final long KEEPALIVE_MS        = 25000;
+    private static final long PREPARE_TIMEOUT_MS  = 18000;
+    private static final long PRE_BUFFER_DELAY_MS = 5000;
+    private static final int  MAX_RETRY           = 10;
+    private static final long UI_HIDE_MS          = 5000;
+    private static final int  TIMEOUT_MS          = 10000;
 
-    // ── ExoPlayer adaptado para TV Box com pouca RAM ──────────
-    // Buffer reduzido: 10MB RAM, 15s buffer (padrão seria 50MB/50s)
-    private static final int BUFFER_MIN_MS     = 5_000;
-    private static final int BUFFER_MAX_MS     = 15_000;
-    private static final int BUFFER_PLAYBACK_MS= 2_500;
-    private static final int BUFFER_REBUFFER_MS= 5_000;
+    // Buffer adaptado para TV Box com pouca RAM e 4-6 Mbps
+    private static final int BUFFER_MIN_MS      = 5_000;
+    private static final int BUFFER_MAX_MS      = 15_000;
+    private static final int BUFFER_PLAYBACK_MS = 2_500;
+    private static final int BUFFER_REBUFFER_MS = 5_000;
 
-    // ── Canais (ordem exata do APK original) ──────────────────
     private static final String[] CHANNEL_NAMES = {
-        "Paróquia Vianney", "TV Família",    "Milênio TV",
-        "Canção Nova",      "TV Católica 2", "TV Católica",
-        "TV Católica HD",   "Gospel Cartoon","Santa Cruz TV",
+        "Paróquia Vianney", "TV Família",     "Milênio TV",
+        "Canção Nova",      "TV Católica 2",  "TV Católica",
+        "TV Católica HD",   "Gospel Cartoon", "Santa Cruz TV",
         "TV Horizonte",     "TV Padre Cícero","Rede Imaculada",
         "TV Pai Eterno"
     };
@@ -73,40 +68,29 @@ public class PlayerActivity extends Activity {
         "https://video09.logicahost.com.br/paieterno/paieterno/playlist.m3u8"
     };
 
-    // ── Estado ────────────────────────────────────────────────
-    private int currentIndex = 5; // começa na TV Católica
+    private int currentIndex = 5;
     private int retryCount   = 0;
-    private boolean uiVisible= false;
-    private boolean surfaceReady = false;
+    private boolean uiVisible = false;
 
-    // ── Players ───────────────────────────────────────────────
-    private ExoPlayer mainPlayer;
-    private ExoPlayer shadowNext; // pre-buffer próximo canal
-    private ExoPlayer shadowPrev; // pre-buffer canal anterior
+    private ExoPlayer mainPlayer, shadowNext, shadowPrev;
 
-    // ── Views ─────────────────────────────────────────────────
     private PlayerView surfaceView;
-    private View       touchOverlay;
-    private View       uiLayer;
+    private View       touchOverlay, uiLayer, loadingView, errorLayout;
     private TextView   chName, chNum, loadTxt, retryTxt, errMsg;
-    private View       loadingView, errorLayout;
     private Button     retryButton;
     private LinearLayout chList;
 
-    // ── Timers ────────────────────────────────────────────────
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable keepaliveTask, prepareTimeoutTask, preBufferTask, uiTask, retryTask;
 
-    // ── Gesto (swipe) ─────────────────────────────────────────
     private GestureDetector gestureDetector;
-    private AudioManager    audioManager;
+    private AudioManager audioManager;
     private AudioFocusRequest audioFocusRequest;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Tela sempre ligada + fullscreen
         getWindow().addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
             WindowManager.LayoutParams.FLAG_FULLSCREEN
@@ -132,10 +116,8 @@ public class PlayerActivity extends Activity {
         retryButton  = findViewById(R.id.retry_button);
         chList       = findViewById(R.id.ch_list);
 
-        // Esconder controles nativos do ExoPlayer (interface limpa)
         surfaceView.setUseController(false);
 
-        // Gesto de swipe
         gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
             public boolean onFling(MotionEvent e1, MotionEvent e2, float vX, float vY) {
@@ -154,10 +136,7 @@ public class PlayerActivity extends Activity {
             }
         });
 
-        touchOverlay.setOnTouchListener((v, e) -> {
-            gestureDetector.onTouchEvent(e); return true;
-        });
-
+        touchOverlay.setOnTouchListener((v, e) -> { gestureDetector.onTouchEvent(e); return true; });
         retryButton.setOnClickListener(v -> { hideError(); loadChannel(currentIndex, null); });
 
         requestAudioFocus();
@@ -166,16 +145,13 @@ public class PlayerActivity extends Activity {
         showUI();
     }
 
-    // ── loadChannel ───────────────────────────────────────────
     private void loadChannel(int index, String fromShadow) {
         if (index < 0) index = CHANNEL_NAMES.length - 1;
         if (index >= CHANNEL_NAMES.length) index = 0;
         currentIndex = index;
         retryCount   = 0;
 
-        cancelKeepalive();
-        cancelPreBuffer();
-        cancelPrepareTimeout();
+        cancelKeepalive(); cancelPreBuffer(); cancelPrepareTimeout();
         if (retryTask != null) { handler.removeCallbacks(retryTask); retryTask = null; }
 
         hideError();
@@ -183,39 +159,28 @@ public class PlayerActivity extends Activity {
         updateChannelInfo();
         buildList();
 
-        // Usar shadow (pre-buffer) se disponível — igual ao APK original
         if ("next".equals(fromShadow) && shadowNext != null) {
-            releaseMain();
-            mainPlayer = shadowNext; shadowNext = null;
-            attachMain();
+            releaseMain(); mainPlayer = shadowNext; shadowNext = null; attachMain();
         } else if ("prev".equals(fromShadow) && shadowPrev != null) {
-            releaseMain();
-            mainPlayer = shadowPrev; shadowPrev = null;
-            attachMain();
+            releaseMain(); mainPlayer = shadowPrev; shadowPrev = null; attachMain();
         } else {
             startMain(CHANNEL_URLS[currentIndex]);
         }
 
         startKeepalive();
         schedulePrepareTimeout();
-        preBufferTask = () -> scheduleAllShadows();
+        preBufferTask = this::scheduleAllShadows;
         handler.postDelayed(preBufferTask, PRE_BUFFER_DELAY_MS);
     }
 
-    // ── startMain ─────────────────────────────────────────────
     private void startMain(String url) {
         releaseMain();
         mainPlayer = buildPlayer();
-        surfaceView.setPlayer(mainPlayer);
-
         DataSource.Factory dsFactory = new DefaultHttpDataSource.Factory()
-            .setConnectTimeoutMs(TIMEOUT_MS)
-            .setReadTimeoutMs(TIMEOUT_MS)
+            .setConnectTimeoutMs(TIMEOUT_MS).setReadTimeoutMs(TIMEOUT_MS)
             .setUserAgent("CanalTV/1.0");
-
         HlsMediaSource source = new HlsMediaSource.Factory(dsFactory)
             .createMediaSource(MediaItem.fromUri(url));
-
         mainPlayer.setMediaSource(source);
         mainPlayer.prepare();
         mainPlayer.setPlayWhenReady(true);
@@ -226,59 +191,40 @@ public class PlayerActivity extends Activity {
         if (mainPlayer == null) return;
         surfaceView.setPlayer(mainPlayer);
         mainPlayer.addListener(new Player.Listener() {
-            @Override
-            public void onPlaybackStateChanged(int state) {
+            @Override public void onPlaybackStateChanged(int state) {
                 if (state == Player.STATE_READY) {
-                    cancelPrepareTimeout();
-                    hideLoading(); hideError();
-                    retryCount = 0;
-                    startKeepalive();
+                    cancelPrepareTimeout(); hideLoading(); hideError();
+                    retryCount = 0; startKeepalive();
                 } else if (state == Player.STATE_BUFFERING) {
                     showLoading(CHANNEL_NAMES[currentIndex], 0);
                 } else if (state == Player.STATE_ENDED) {
                     doRecover();
                 }
             }
-            @Override
-            public void onPlayerError(PlaybackException error) {
-                doRecover();
-            }
+            @Override public void onPlayerError(PlaybackException error) { doRecover(); }
         });
     }
 
-    // ── buildPlayer — ExoPlayer com LoadControl adaptado ─────
-    // Aqui está o coração da adaptação: menos RAM, buffer menor
     private ExoPlayer buildPlayer() {
-        LoadControl loadControl = new DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                BUFFER_MIN_MS,      // buffer mínimo: 5s
-                BUFFER_MAX_MS,      // buffer máximo: 15s (padrão: 50s)
-                BUFFER_PLAYBACK_MS, // tempo pra iniciar playback: 2.5s
-                BUFFER_REBUFFER_MS  // tempo pra rebuffer: 5s
-            )
-            .setTargetBufferBytes(10 * 1024 * 1024) // 10MB max RAM (padrão: sem limite)
+        LoadControl lc = new DefaultLoadControl.Builder()
+            .setBufferDurationsMs(BUFFER_MIN_MS, BUFFER_MAX_MS, BUFFER_PLAYBACK_MS, BUFFER_REBUFFER_MS)
+            .setTargetBufferBytes(10 * 1024 * 1024)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build();
-
-        return new ExoPlayer.Builder(this)
-            .setLoadControl(loadControl)
-            .build();
+        return new ExoPlayer.Builder(this).setLoadControl(lc).build();
     }
 
-    // ── buildShadow (pre-buffer leve) ─────────────────────────
     private ExoPlayer buildShadow(String url) {
         LoadControl lc = new DefaultLoadControl.Builder()
             .setBufferDurationsMs(2000, 5000, 1000, 2000)
-            .setTargetBufferBytes(2 * 1024 * 1024) // 2MB
-            .build();
+            .setTargetBufferBytes(2 * 1024 * 1024).build();
         ExoPlayer p = new ExoPlayer.Builder(this).setLoadControl(lc).build();
         DataSource.Factory dsFactory = new DefaultHttpDataSource.Factory()
             .setConnectTimeoutMs(8000).setReadTimeoutMs(8000);
-        HlsMediaSource src = new HlsMediaSource.Factory(dsFactory)
-            .createMediaSource(MediaItem.fromUri(url));
-        p.setMediaSource(src);
+        p.setMediaSource(new HlsMediaSource.Factory(dsFactory)
+            .createMediaSource(MediaItem.fromUri(url)));
         p.prepare();
-        p.setPlayWhenReady(false); // só pré-carrega, não toca
+        p.setPlayWhenReady(false);
         return p;
     }
 
@@ -295,20 +241,15 @@ public class PlayerActivity extends Activity {
         if (shadowPrev != null) { shadowPrev.release(); shadowPrev = null; }
     }
 
-    // ── doRecover — reconexão exponencial ─────────────────────
     private void doRecover() {
         retryCount++;
-        if (retryCount > MAX_RETRY) {
-            showError("Sem sinal após várias tentativas.\nVerifique sua internet.");
-            return;
-        }
+        if (retryCount > MAX_RETRY) { showError("Sem sinal.\nVerifique sua internet."); return; }
         long delay = Math.min(2000L * retryCount, 15000L);
         showLoading(CHANNEL_NAMES[currentIndex], retryCount);
         retryTask = () -> startMain(CHANNEL_URLS[currentIndex]);
         handler.postDelayed(retryTask, delay);
     }
 
-    // ── Keepalive ─────────────────────────────────────────────
     private void startKeepalive() {
         cancelKeepalive();
         keepaliveTask = () -> {
@@ -317,8 +258,8 @@ public class PlayerActivity extends Activity {
         };
         handler.postDelayed(keepaliveTask, KEEPALIVE_MS);
     }
-    private void cancelKeepalive()       { if (keepaliveTask != null) { handler.removeCallbacks(keepaliveTask); keepaliveTask = null; } }
-    private void cancelPreBuffer()       { if (preBufferTask != null) { handler.removeCallbacks(preBufferTask); preBufferTask = null; } }
+    private void cancelKeepalive() { if (keepaliveTask != null) { handler.removeCallbacks(keepaliveTask); keepaliveTask = null; } }
+    private void cancelPreBuffer()  { if (preBufferTask != null) { handler.removeCallbacks(preBufferTask); preBufferTask = null; } }
     private void schedulePrepareTimeout() {
         cancelPrepareTimeout();
         prepareTimeoutTask = () -> { if (mainPlayer == null || mainPlayer.getPlaybackState() < Player.STATE_READY) doRecover(); };
@@ -330,7 +271,6 @@ public class PlayerActivity extends Activity {
         if (mainPlayer != null) { mainPlayer.release(); mainPlayer = null; }
     }
 
-    // ── UI ─────────────────────────────────────────────────────
     private void buildList() {
         chList.removeAllViews();
         for (int i = 0; i < CHANNEL_NAMES.length; i++) {
@@ -341,9 +281,7 @@ public class PlayerActivity extends Activity {
             tv.setBackgroundColor(i == currentIndex ? 0xFFFFFFFF : 0x33FFFFFF);
             tv.setPadding(24, 16, 24, 16);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            );
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             lp.setMarginEnd(12);
             tv.setLayoutParams(lp);
             tv.setOnClickListener(v -> { loadChannel(idx, null); hideUI(); });
@@ -357,13 +295,12 @@ public class PlayerActivity extends Activity {
     }
 
     private void showUI() {
-        uiLayer.setVisibility(View.VISIBLE);
-        uiVisible = true;
+        uiLayer.setVisibility(View.VISIBLE); uiVisible = true;
         if (uiTask != null) handler.removeCallbacks(uiTask);
         uiTask = this::hideUI;
         handler.postDelayed(uiTask, UI_HIDE_MS);
     }
-    private void hideUI() { uiLayer.setVisibility(View.INVISIBLE); uiVisible = false; }
+    private void hideUI()   { uiLayer.setVisibility(View.INVISIBLE); uiVisible = false; }
     private void toggleUI() { if (uiVisible) hideUI(); else showUI(); }
 
     private void showLoading(String name, int retry) {
@@ -374,9 +311,8 @@ public class PlayerActivity extends Activity {
     }
     private void hideLoading() { loadingView.setVisibility(View.GONE); }
     private void showError(String msg) { hideLoading(); errorLayout.setVisibility(View.VISIBLE); errMsg.setText(msg); }
-    private void hideError() { errorLayout.setVisibility(View.GONE); }
+    private void hideError()  { errorLayout.setVisibility(View.GONE); }
 
-    // ── Navegação ─────────────────────────────────────────────
     private void goNext() { loadChannel(currentIndex + 1, "next"); showUI(); }
     private void goPrev() { loadChannel(currentIndex - 1, "prev"); showUI(); }
 
@@ -385,21 +321,16 @@ public class PlayerActivity extends Activity {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
             case KeyEvent.KEYCODE_PAGE_UP:
-            case KeyEvent.KEYCODE_CHANNEL_DOWN:
-                goPrev(); return true;
+            case KeyEvent.KEYCODE_CHANNEL_DOWN: goPrev(); return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
             case KeyEvent.KEYCODE_PAGE_DOWN:
-            case KeyEvent.KEYCODE_CHANNEL_UP:
-                goNext(); return true;
+            case KeyEvent.KEYCODE_CHANNEL_UP:   goNext(); return true;
             case KeyEvent.KEYCODE_DPAD_UP:
-            case KeyEvent.KEYCODE_VOLUME_UP:
-                adjustVolume(AudioManager.ADJUST_RAISE); return true;
+            case KeyEvent.KEYCODE_VOLUME_UP:    adjustVolume(AudioManager.ADJUST_RAISE); return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
-            case KeyEvent.KEYCODE_VOLUME_DOWN:
-                adjustVolume(AudioManager.ADJUST_LOWER); return true;
+            case KeyEvent.KEYCODE_VOLUME_DOWN:  adjustVolume(AudioManager.ADJUST_LOWER); return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-                toggleUI(); return true;
+            case KeyEvent.KEYCODE_ENTER:        toggleUI(); return true;
             case KeyEvent.KEYCODE_BACK:
                 if (uiVisible) { hideUI(); return true; }
                 return super.onKeyDown(keyCode, event);
@@ -407,9 +338,9 @@ public class PlayerActivity extends Activity {
         return super.onKeyDown(keyCode, event);
     }
 
-    private void adjustVolume(int direction) {
+    private void adjustVolume(int dir) {
         if (audioManager != null)
-            audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI);
+            audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI);
     }
 
     private void requestAudioFocus() {
@@ -424,15 +355,11 @@ public class PlayerActivity extends Activity {
         }
     }
 
-    @Override
-    protected void onPause()   { super.onPause();   if (mainPlayer != null) mainPlayer.setPlayWhenReady(false); }
-    @Override
-    protected void onResume()  { super.onResume();  if (mainPlayer != null) mainPlayer.setPlayWhenReady(true); }
-    @Override
-    protected void onDestroy() {
+    @Override protected void onPause()   { super.onPause();   if (mainPlayer != null) mainPlayer.setPlayWhenReady(false); }
+    @Override protected void onResume()  { super.onResume();  if (mainPlayer != null) mainPlayer.setPlayWhenReady(true); }
+    @Override protected void onDestroy() {
         super.onDestroy();
         cancelKeepalive(); cancelPreBuffer(); cancelPrepareTimeout();
-        cancelAllShadowTasks();
-        releaseMain();
+        cancelAllShadowTasks(); releaseMain();
     }
 }
