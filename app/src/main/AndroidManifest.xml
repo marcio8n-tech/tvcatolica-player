@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.tvcatolica.exoplayer">
 
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher"
-        android:label="TV Católica"
+        android:label="TV Católica HD"
         android:theme="@style/AppTheme_Fullscreen">
 
         <activity
-            android:name=".PlayerActivity"
+            android:name="com.tvcatolica.player.PlayerActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true"
             android:launchMode="singleInstance"
