@@ -6,40 +6,28 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.GestureDetector;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
-import android.widget.Button;
-import android.widget.LinearLayout;
-import android.widget.ProgressBar;
-import android.widget.TextView;
-import androidx.appcompat.app.AppCompatActivity;
 import androidx.annotation.OptIn;
+import androidx.appcompat.app.AppCompatActivity;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
+import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.DefaultLoadControl;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.LoadControl;
 import androidx.media3.exoplayer.hls.HlsMediaSource;
-import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.ui.PlayerView;
 
 @OptIn(markerClass = UnstableApi.class)
 public class PlayerActivity extends AppCompatActivity {
 
-    private static final int  MAX_RETRY          = 10;
-    private static final long KEEPALIVE_MS        = 25_000;
-    private static final long UI_HIDE_MS          = 5_000;
-    private static final long PREPARE_TIMEOUT_MS  = 18_000;
-
-    private static final String[] NAMES = {
-        "Paróquia Vianney","TV Família","Milênio TV",
-        "Canção Nova","TV Católica 2","TV Católica",
-        "TV Católica HD","Gospel Cartoon","Santa Cruz TV",
-        "TV Horizonte","TV Padre Cícero","Rede Imaculada","TV Pai Eterno"
-    };
+    // ── Canais ──────────────────────────────────────────────────
     private static final String[] URLS = {
         "https://58c8a6b3c74e2.streamlock.net:1936/paroquiavianney/smil:paroquiavianney.smil/playlist.m3u8",
         "https://59d39900ebfb8.streamlock.net/tvfamilia_480p/tvfamilia_480p/playlist.m3u8",
@@ -56,26 +44,42 @@ public class PlayerActivity extends AppCompatActivity {
         "https://video09.logicahost.com.br/paieterno/paieterno/playlist.m3u8"
     };
 
-    private int     idx        = 5; // TV Católica
-    private int     retries    = 0;
-    private boolean uiVisible  = false;
+    // ── Configurações ────────────────────────────────────────────
+    private static final int  MAX_RETRY      = 12;
+    private static final long RETRY_BASE_MS  = 3_000;
+    private static final long KEEPALIVE_MS   = 20_000;
+    private static final long ARROWS_SHOW_MS = 2_500;  // tempo que as setas ficam visíveis
+    private static final long TIMEOUT_MS     = 15_000;
+    // Buffer leve para TV Box (4-6 Mbps)
+    private static final int  BUF_MIN   = 4_000;
+    private static final int  BUF_MAX   = 12_000;
+    private static final int  BUF_PLAY  = 1_500;
+    private static final int  BUF_REBUF = 3_000;
 
-    private ExoPlayer    player;
-    private PlayerView   playerView;
-    private TextView     tvName, tvNum, tvLoad, tvRetry, tvErr;
-    private View         loading, errorBox;
-    private Button       btnRetry;
-    private LinearLayout chList;
-    private View         uiLayer;
-    private AudioManager audio;
+    // ── Estado ───────────────────────────────────────────────────
+    private int idx     = 5;   // TV Católica como padrão
+    private int retries = 0;
 
-    private final Handler  h       = new Handler(Looper.getMainLooper());
-    private       Runnable rKeep, rTimeout, rUi, rRetry;
+    // ── Players ──────────────────────────────────────────────────
+    private ExoPlayer main, shadow;   // shadow = pré-carrega o canal vizinho
 
-    // ─────────────────────────────────────────────────────────────
+    // ── Views ────────────────────────────────────────────────────
+    private PlayerView playerView;
+    private View       btnPrev, btnNext, touchArea;
+
+    // ── Handler ──────────────────────────────────────────────────
+    private final Handler h = new Handler(Looper.getMainLooper());
+    private Runnable rArrows, rKeep, rTimeout, rRetry;
+
+    private GestureDetector gesture;
+    private AudioManager    audio;
+
+    // ════════════════════════════════════════════════════════════
     @Override
     protected void onCreate(Bundle s) {
         super.onCreate(s);
+
+        // Tela cheia, sem barra de status, tela sempre ligada
         getWindow().addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
             WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -86,78 +90,78 @@ public class PlayerActivity extends AppCompatActivity {
 
         setContentView(R.layout.activity_player);
 
-        playerView = findViewById(R.id.surface_view);
-        uiLayer    = findViewById(R.id.ui_layer);
-        tvName     = findViewById(R.id.ch_name);
-        tvNum      = findViewById(R.id.ch_num);
-        tvLoad     = findViewById(R.id.load_txt);
-        tvRetry    = findViewById(R.id.retry_txt);
-        tvErr      = findViewById(R.id.err_msg);
-        loading    = findViewById(R.id.loading_view);
-        errorBox   = findViewById(R.id.error_layout);
-        btnRetry   = findViewById(R.id.retry_button);
-        chList     = findViewById(R.id.ch_list);
+        playerView = findViewById(R.id.player_main);
+        btnPrev    = findViewById(R.id.btn_prev);
+        btnNext    = findViewById(R.id.btn_next);
+        touchArea  = findViewById(R.id.touch_area);
 
+        // Desabilitar controller padrão do ExoPlayer (tela limpa)
         playerView.setUseController(false);
 
         audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
-        btnRetry.setOnClickListener(v -> { errorBox.setVisibility(View.GONE); loadCh(idx); });
+        // Gestos de swipe na área de toque
+        gesture = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onFling(MotionEvent e1, MotionEvent e2, float vX, float vY) {
+                if (e1 == null || e2 == null) return false;
+                float dx = e2.getX() - e1.getX();
+                if (Math.abs(dx) > 80 && Math.abs(dx) > Math.abs(e2.getY() - e1.getY())) {
+                    if (dx < 0) goNext(); else goPrev();
+                    return true;
+                }
+                return false;
+            }
+            @Override
+            public boolean onSingleTapConfirmed(MotionEvent e) {
+                showArrows();
+                return true;
+            }
+        });
 
-        // Toque na tela
-        playerView.setOnClickListener(v -> toggleUi());
+        touchArea.setOnTouchListener((v, e) -> { gesture.onTouchEvent(e); return true; });
 
-        buildList();
-        loadCh(idx);
-        showUi();
+        btnPrev.setOnClickListener(v -> goPrev());
+        btnNext.setOnClickListener(v -> goNext());
+
+        // Carregar canal padrão e pré-carregar vizinhos
+        loadChannel(idx, true);
     }
 
-    // ─────────────────────────────────────────────────────────────
-    private void loadCh(int i) {
-        if (i < 0) i = NAMES.length - 1;
-        if (i >= NAMES.length) i = 0;
-        idx = i; retries = 0;
+    // ════════════════════════════════════════════════════════════
+    // Carrega um canal no player principal
+    private void loadChannel(int i, boolean startShadow) {
+        idx     = clamp(i);
+        retries = 0;
+        cancel(rRetry); cancel(rTimeout); cancel(rKeep);
 
-        cancel(rKeep); cancel(rTimeout); cancel(rRetry);
-        errorBox.setVisibility(View.GONE);
-        loading.setVisibility(View.VISIBLE);
-        tvLoad.setText("Carregando " + NAMES[idx] + "...");
-        tvRetry.setText("");
-        tvName.setText(NAMES[idx]);
-        tvNum.setText("Canal " + (idx+1) + " de " + NAMES.length);
-        buildList();
-        play(URLS[idx]);
+        // Liberar shadow (será recriado depois)
+        releaseShadow();
+
+        // Iniciar player principal
+        startMain(URLS[idx]);
+
+        // Depois que o main estiver estável, pré-carregar próximo
+        if (startShadow) {
+            h.postDelayed(() -> preload(clamp(idx + 1)), 6_000);
+        }
     }
 
-    private void play(String url) {
-        if (player != null) { player.release(); player = null; }
+    // ── Player principal ─────────────────────────────────────────
+    private void startMain(String url) {
+        releaseMain();
+        main = buildPlayer(BUF_MIN, BUF_MAX, BUF_PLAY, BUF_REBUF, 8 * 1024 * 1024);
+        playerView.setPlayer(main);
 
-        LoadControl lc = new DefaultLoadControl.Builder()
-            .setBufferDurationsMs(5_000, 15_000, 2_500, 5_000)
-            .setTargetBufferBytes(10 * 1024 * 1024)
-            .setPrioritizeTimeOverSizeThresholds(true)
-            .build();
+        main.setMediaSource(hlsSource(url));
+        main.prepare();
+        main.setPlayWhenReady(true);
 
-        player = new ExoPlayer.Builder(this).setLoadControl(lc).build();
-        playerView.setPlayer(player);
-
-        HlsMediaSource src = new HlsMediaSource.Factory(
-            new DefaultHttpDataSource.Factory()
-                .setConnectTimeoutMs(10_000)
-                .setReadTimeoutMs(10_000)
-                .setUserAgent("TVCatolica/2.0"))
-            .createMediaSource(MediaItem.fromUri(Uri.parse(url)));
-
-        player.setMediaSource(src);
-        player.prepare();
-        player.setPlayWhenReady(true);
-
-        player.addListener(new Player.Listener() {
+        main.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int st) {
                 if (st == Player.STATE_READY) {
-                    loading.setVisibility(View.GONE);
-                    retries = 0;
                     cancel(rTimeout);
+                    retries = 0;
                     keepalive();
                 } else if (st == Player.STATE_ENDED) {
                     recover();
@@ -166,100 +170,172 @@ public class PlayerActivity extends AppCompatActivity {
             @Override public void onPlayerError(PlaybackException e) { recover(); }
         });
 
+        // Timeout: se não abrir em TIMEOUT_MS, tenta de novo
         cancel(rTimeout);
-        rTimeout = () -> { if (player == null || player.getPlaybackState() < Player.STATE_READY) recover(); };
-        h.postDelayed(rTimeout, PREPARE_TIMEOUT_MS);
+        rTimeout = this::recover;
+        h.postDelayed(rTimeout, TIMEOUT_MS);
     }
 
+    // ── Shadow (pré-carregamento silencioso) ─────────────────────
+    private void preload(int nextIdx) {
+        releaseShadow();
+        shadow = buildPlayer(2_000, 6_000, 1_000, 2_000, 3 * 1024 * 1024);
+        shadow.setMediaSource(hlsSource(URLS[nextIdx]));
+        shadow.prepare();
+        shadow.setPlayWhenReady(false); // silencioso, só baixa os primeiros segmentos
+    }
+
+    // Troca para o shadow (transição instantânea) se disponível
+    private void switchToShadow() {
+        if (shadow == null) return;
+        cancel(rKeep); cancel(rTimeout); cancel(rRetry);
+        releaseMain();
+        main   = shadow;
+        shadow = null;
+        playerView.setPlayer(main);
+        main.setPlayWhenReady(true);
+        main.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int st) {
+                if (st == Player.STATE_READY) { cancel(rTimeout); retries = 0; keepalive(); }
+                else if (st == Player.STATE_ENDED) { recover(); }
+            }
+            @Override public void onPlayerError(PlaybackException e) { recover(); }
+        });
+        retries = 0;
+    }
+
+    // ── Recuperação automática ───────────────────────────────────
     private void recover() {
         retries++;
         if (retries > MAX_RETRY) {
-            loading.setVisibility(View.GONE);
-            errorBox.setVisibility(View.VISIBLE);
-            tvErr.setText("Sem sinal após " + MAX_RETRY + " tentativas.\nVerifique sua internet.");
+            // Esgotou tentativas — aguarda 30s e tenta do zero
+            h.postDelayed(() -> { retries = 0; startMain(URLS[idx]); }, 30_000);
             return;
         }
-        long delay = Math.min(2000L * retries, 15_000L);
-        loading.setVisibility(View.VISIBLE);
-        tvRetry.setText("Tentativa " + retries + "/" + MAX_RETRY);
+        long delay = Math.min(RETRY_BASE_MS * retries, 20_000L);
         cancel(rRetry);
-        rRetry = () -> play(URLS[idx]);
+        rRetry = () -> startMain(URLS[idx]);
         h.postDelayed(rRetry, delay);
     }
 
     private void keepalive() {
         cancel(rKeep);
         rKeep = () -> {
-            if (player != null && !player.isPlaying()) recover();
-            else keepalive();
+            if (main != null && !main.isPlaying() && main.getPlaybackState() != Player.STATE_BUFFERING)
+                recover();
+            else
+                keepalive();
         };
         h.postDelayed(rKeep, KEEPALIVE_MS);
     }
 
-    // ─────────────────────────────────────────────────────────────
-    private void buildList() {
-        if (chList == null) return;
-        chList.removeAllViews();
-        for (int i = 0; i < NAMES.length; i++) {
-            final int fi = i;
-            TextView tv = new TextView(this);
-            tv.setText((i+1) + ". " + NAMES[i]);
-            tv.setTextColor(i == idx ? 0xFF000000 : 0xFFFFFFFF);
-            tv.setBackgroundColor(i == idx ? 0xFFFFFFFF : 0x44000000);
-            tv.setPadding(20, 12, 20, 12);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-            lp.setMarginEnd(8);
-            tv.setLayoutParams(lp);
-            tv.setOnClickListener(v -> { loadCh(fi); hideUi(); });
-            chList.addView(tv);
+    // ── Navegação ────────────────────────────────────────────────
+    private void goNext() {
+        int next = clamp(idx + 1);
+        // Se o shadow já pré-carregou esse canal, transição instantânea
+        if (shadow != null) {
+            switchToShadow();
+            idx = next;
+            h.postDelayed(() -> preload(clamp(idx + 1)), 6_000);
+        } else {
+            loadChannel(next, true);
         }
+        showArrows();
     }
 
-    private void showUi() {
-        if (uiLayer == null) return;
-        uiLayer.setVisibility(View.VISIBLE);
-        uiVisible = true;
-        cancel(rUi);
-        rUi = this::hideUi;
-        h.postDelayed(rUi, UI_HIDE_MS);
+    private void goPrev() {
+        loadChannel(clamp(idx - 1), true);
+        showArrows();
     }
-    private void hideUi()   { if (uiLayer != null) uiLayer.setVisibility(View.GONE); uiVisible = false; }
-    private void toggleUi() { if (uiVisible) hideUi(); else showUi(); }
 
+    // ── Setas (aparecem só quando o usuário interage) ────────────
+    private void showArrows() {
+        btnPrev.setVisibility(View.VISIBLE);
+        btnNext.setVisibility(View.VISIBLE);
+        cancel(rArrows);
+        rArrows = () -> {
+            btnPrev.setVisibility(View.GONE);
+            btnNext.setVisibility(View.GONE);
+        };
+        h.postDelayed(rArrows, ARROWS_SHOW_MS);
+    }
+
+    // ── Construção de players e sources ─────────────────────────
+    private ExoPlayer buildPlayer(int bMin, int bMax, int bPlay, int bRebuf, int maxBytes) {
+        LoadControl lc = new DefaultLoadControl.Builder()
+            .setBufferDurationsMs(bMin, bMax, bPlay, bRebuf)
+            .setTargetBufferBytes(maxBytes)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build();
+        return new ExoPlayer.Builder(this).setLoadControl(lc).build();
+    }
+
+    private HlsMediaSource hlsSource(String url) {
+        return new HlsMediaSource.Factory(
+            new DefaultHttpDataSource.Factory()
+                .setConnectTimeoutMs(10_000)
+                .setReadTimeoutMs(10_000)
+                .setUserAgent("TVCatolica/4.0"))
+            .createMediaSource(MediaItem.fromUri(Uri.parse(url)));
+    }
+
+    private int clamp(int i) {
+        if (i < 0) return URLS.length - 1;
+        if (i >= URLS.length) return 0;
+        return i;
+    }
+
+    // ── Liberação de players ─────────────────────────────────────
+    private void releaseMain() {
+        cancel(rKeep);
+        if (main != null) { main.release(); main = null; }
+    }
+    private void releaseShadow() {
+        if (shadow != null) { shadow.release(); shadow = null; }
+    }
     private void cancel(Runnable r) { if (r != null) h.removeCallbacks(r); }
 
-    // ─────────────────────────────────────────────────────────────
-    @Override public boolean onKeyDown(int code, KeyEvent e) {
+    // ── Controle remoto (D-Pad) ──────────────────────────────────
+    @Override
+    public boolean onKeyDown(int code, KeyEvent e) {
         switch (code) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
             case KeyEvent.KEYCODE_PAGE_UP:
             case KeyEvent.KEYCODE_CHANNEL_DOWN:
-                loadCh(idx - 1); showUi(); return true;
+                goPrev(); return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
             case KeyEvent.KEYCODE_PAGE_DOWN:
             case KeyEvent.KEYCODE_CHANNEL_UP:
-                loadCh(idx + 1); showUi(); return true;
+                goNext(); return true;
+            case KeyEvent.KEYCODE_DPAD_UP:
             case KeyEvent.KEYCODE_VOLUME_UP:
-                audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI); return true;
+                audio.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI); return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
             case KeyEvent.KEYCODE_VOLUME_DOWN:
-                audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI); return true;
+                audio.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI); return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
-                toggleUi(); return true;
+                showArrows(); return true;
             case KeyEvent.KEYCODE_BACK:
-                if (uiVisible) { hideUi(); return true; }
-                return super.onKeyDown(code, e);
+                finish(); return true;
         }
         return super.onKeyDown(code, e);
     }
 
-    @Override protected void onPause()  { super.onPause();  if (player != null) player.setPlayWhenReady(false); }
-    @Override protected void onResume() { super.onResume(); if (player != null) player.setPlayWhenReady(true); }
-    @Override protected void onDestroy(){
+    // ── Ciclo de vida ────────────────────────────────────────────
+    @Override protected void onPause() {
+        super.onPause();
+        if (main != null) main.setPlayWhenReady(false);
+    }
+    @Override protected void onResume() {
+        super.onResume();
+        if (main != null) main.setPlayWhenReady(true);
+    }
+    @Override protected void onDestroy() {
         super.onDestroy();
-        cancel(rKeep); cancel(rTimeout); cancel(rUi); cancel(rRetry);
-        if (player != null) { player.release(); player = null; }
+        cancel(rArrows); cancel(rKeep); cancel(rTimeout); cancel(rRetry);
+        releaseMain(); releaseShadow();
     }
 }
