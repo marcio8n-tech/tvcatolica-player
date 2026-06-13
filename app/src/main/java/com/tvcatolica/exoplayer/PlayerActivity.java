@@ -27,7 +27,7 @@ import androidx.media3.ui.PlayerView;
 @OptIn(markerClass = UnstableApi.class)
 public class PlayerActivity extends AppCompatActivity {
 
-    // ── Ordem EXATA do app original ──────────────────────────────
+    // Ordem idêntica ao app original
     private static final String[] URLS = {
         "https://58c8a6b3c74e2.streamlock.net:1936/paroquiavianney/smil:paroquiavianney.smil/playlist.m3u8",
         "https://59d39900ebfb8.streamlock.net/tvfamilia_480p/tvfamilia_480p/playlist.m3u8",
@@ -44,49 +44,30 @@ public class PlayerActivity extends AppCompatActivity {
         "https://video09.logicahost.com.br/paieterno/paieterno/playlist.m3u8"
     };
 
-    // ── Timings ──────────────────────────────────────────────────
-    private static final int  MAX_RETRY     = 12;
-    private static final long RETRY_BASE_MS = 3_000;
-    private static final long KEEPALIVE_MS  = 20_000;
-    private static final long TIMEOUT_MS    = 15_000;
-    // Shadow começa imediatamente após o main ficar pronto
-    private static final long SHADOW_DELAY_MS = 1_500;
+    // Timings
+    private static final long KEEPALIVE_MS = 20_000;
+    private static final long TIMEOUT_MS   = 15_000;
+    private static final long RETRY_MAX_MS = 15_000;
+    private static final int  MAX_RETRY    = 10;
 
-    // Buffer main: equilibrado para 4-6 Mbps
-    private static final int M_MIN   = 4_000;
-    private static final int M_MAX   = 12_000;
-    private static final int M_PLAY  = 1_500;
-    private static final int M_REBUF = 3_000;
-
-    // Buffer shadow: agressivo — só precisa ter os primeiros segmentos prontos
-    private static final int S_MIN   = 8_000;  // exige 8s antes de considerar "pronto"
-    private static final int S_MAX   = 20_000;
-    private static final int S_PLAY  = 8_000;
-    private static final int S_REBUF = 8_000;
-
-    // ── Estado ───────────────────────────────────────────────────
-    private int idx     = 5;   // inicia na TV Católica (posição original)
+    // Estado
+    private int idx     = 5; // TV Católica
     private int retries = 0;
 
-    // ── Players ──────────────────────────────────────────────────
-    private ExoPlayer main;
-    private ExoPlayer shadowNext;  // pré-carrega idx+1
-    private ExoPlayer shadowPrev;  // pré-carrega idx-1
-    private int       shadowNextIdx = -1;
-    private int       shadowPrevIdx = -1;
+    // UM único player — sem shadow, sem pré-carregamento
+    private ExoPlayer player;
 
-    // ── Views ────────────────────────────────────────────────────
+    // Views
     private PlayerView playerView;
     private View       touchArea;
 
-    // ── Handler ──────────────────────────────────────────────────
-    private final Handler  h = new Handler(Looper.getMainLooper());
-    private Runnable rKeep, rTimeout, rRetry, rShadow;
+    // Handler
+    private final Handler h = new Handler(Looper.getMainLooper());
+    private Runnable rKeep, rTimeout, rRetry;
 
     private GestureDetector gesture;
     private AudioManager    audio;
 
-    // ════════════════════════════════════════════════════════════
     @Override
     protected void onCreate(Bundle s) {
         super.onCreate(s);
@@ -109,7 +90,7 @@ public class PlayerActivity extends AppCompatActivity {
 
         audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
-        // Swipe: esquerda = próximo, direita = anterior (igual app original)
+        // Swipe horizontal para trocar canal
         gesture = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
             public boolean onFling(MotionEvent e1, MotionEvent e2, float vX, float vY) {
@@ -125,144 +106,92 @@ public class PlayerActivity extends AppCompatActivity {
         });
         touchArea.setOnTouchListener((v, e) -> { gesture.onTouchEvent(e); return true; });
 
-        loadChannel(idx);
+        play(idx);
     }
 
-    // ════════════════════════════════════════════════════════════
-    // Navegação
-    private void goNext() {
-        int next = clamp(idx + 1);
-        // Se shadow do próximo já está pronto: troca instantânea
-        if (shadowNext != null && shadowNextIdx == next &&
-                shadowNext.getPlaybackState() >= Player.STATE_READY) {
-            promoteNext();
-        } else {
-            loadChannel(next);
-        }
-    }
+    // Navegar
+    private void goNext() { play(clamp(idx + 1)); }
+    private void goPrev() { play(clamp(idx - 1)); }
 
-    private void goPrev() {
-        int prev = clamp(idx - 1);
-        if (shadowPrev != null && shadowPrevIdx == prev &&
-                shadowPrev.getPlaybackState() >= Player.STATE_READY) {
-            promotePrev();
-        } else {
-            loadChannel(prev);
-        }
-    }
-
-    // Promove shadowNext → main
-    private void promoteNext() {
+    // Carregar canal — destrói o player anterior e cria um novo limpo
+    private void play(int i) {
+        idx     = clamp(i);
+        retries = 0;
         cancel(rKeep); cancel(rTimeout); cancel(rRetry);
-        releaseMain();
-        main = shadowNext;
-        shadowNext = null; shadowNextIdx = -1;
-        idx = clamp(idx + 1);
-        attachMain();
-        main.setPlayWhenReady(true);
-        scheduleShadows();
+        releasePlayer();
+        startPlayer();
     }
 
-    // Promove shadowPrev → main
-    private void promotePrev() {
-        cancel(rKeep); cancel(rTimeout); cancel(rRetry);
-        releaseMain();
-        main = shadowPrev;
-        shadowPrev = null; shadowPrevIdx = -1;
-        idx = clamp(idx - 1);
-        attachMain();
-        main.setPlayWhenReady(true);
-        scheduleShadows();
-    }
+    private void startPlayer() {
+        // Buffer bem conservador para TV Box com pouca RAM
+        LoadControl lc = new DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                3_000,   // min buffer antes de começar
+                8_000,   // max buffer (não acumula mais que isso)
+                1_500,   // buffer para iniciar playback
+                2_000)   // buffer para sair do rebuffering
+            .setTargetBufferBytes(4 * 1024 * 1024) // máx 4MB de buffer na RAM
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build();
 
-    // Carrega canal do zero (sem shadow disponível)
-    private void loadChannel(int i) {
-        idx = clamp(i); retries = 0;
-        cancel(rKeep); cancel(rTimeout); cancel(rRetry); cancel(rShadow);
-        releaseAllShadows();
-        startMain(URLS[idx]);
-    }
+        player = new ExoPlayer.Builder(this)
+            .setLoadControl(lc)
+            .build();
 
-    // ════════════════════════════════════════════════════════════
-    // Player principal
-    private void startMain(String url) {
-        releaseMain();
-        main = buildPlayer(M_MIN, M_MAX, M_PLAY, M_REBUF, 10 * 1024 * 1024);
-        main.setMediaSource(hlsSource(url));
-        main.prepare();
-        main.setPlayWhenReady(true);
-        attachMain();
+        playerView.setPlayer(player);
 
-        cancel(rTimeout);
-        rTimeout = this::recover;
-        h.postDelayed(rTimeout, TIMEOUT_MS);
-    }
+        HlsMediaSource src = new HlsMediaSource.Factory(
+            new DefaultHttpDataSource.Factory()
+                .setConnectTimeoutMs(10_000)
+                .setReadTimeoutMs(10_000)
+                .setUserAgent("TVCatolica/7.0"))
+            .createMediaSource(MediaItem.fromUri(Uri.parse(URLS[idx])));
 
-    private void attachMain() {
-        playerView.setPlayer(main);
-        main.addListener(new Player.Listener() {
+        player.setMediaSource(src);
+        player.prepare();
+        player.setPlayWhenReady(true);
+
+        player.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int st) {
                 if (st == Player.STATE_READY) {
                     cancel(rTimeout);
                     retries = 0;
                     keepalive();
-                    // Assim que o main está rodando, agenda shadows
-                    cancel(rShadow);
-                    rShadow = PlayerActivity.this::scheduleShadows;
-                    h.postDelayed(rShadow, SHADOW_DELAY_MS);
                 } else if (st == Player.STATE_ENDED) {
                     recover();
                 }
             }
             @Override public void onPlayerError(PlaybackException e) { recover(); }
         });
+
+        // Timeout se não abrir
+        cancel(rTimeout);
+        rTimeout = this::recover;
+        h.postDelayed(rTimeout, TIMEOUT_MS);
     }
 
-    // ════════════════════════════════════════════════════════════
-    // Pré-carregamento dos dois vizinhos simultaneamente
-    private void scheduleShadows() {
-        int ni = clamp(idx + 1);
-        int pi = clamp(idx - 1);
-
-        // Só recria se o índice mudou
-        if (shadowNextIdx != ni) {
-            if (shadowNext != null) shadowNext.release();
-            shadowNext    = buildPlayer(S_MIN, S_MAX, S_PLAY, S_REBUF, 5 * 1024 * 1024);
-            shadowNextIdx = ni;
-            shadowNext.setMediaSource(hlsSource(URLS[ni]));
-            shadowNext.prepare();
-            shadowNext.setPlayWhenReady(false);
-        }
-
-        if (shadowPrevIdx != pi) {
-            if (shadowPrev != null) shadowPrev.release();
-            shadowPrev    = buildPlayer(S_MIN, S_MAX, S_PLAY, S_REBUF, 5 * 1024 * 1024);
-            shadowPrevIdx = pi;
-            shadowPrev.setMediaSource(hlsSource(URLS[pi]));
-            shadowPrev.prepare();
-            shadowPrev.setPlayWhenReady(false);
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════
-    // Recuperação automática (sem mostrar nada na tela)
+    // Reconexão automática silenciosa
     private void recover() {
         retries++;
         if (retries > MAX_RETRY) {
-            h.postDelayed(() -> { retries = 0; startMain(URLS[idx]); }, 30_000);
+            // Pausa 30s e tenta do zero
+            releasePlayer();
+            h.postDelayed(() -> { retries = 0; startPlayer(); }, 30_000);
             return;
         }
-        long delay = Math.min(RETRY_BASE_MS * retries, 20_000L);
+        long delay = Math.min(2_000L * retries, RETRY_MAX_MS);
         cancel(rRetry);
-        rRetry = () -> startMain(URLS[idx]);
+        rRetry = () -> { releasePlayer(); startPlayer(); };
         h.postDelayed(rRetry, delay);
     }
 
+    // Verifica se o stream não parou silenciosamente
     private void keepalive() {
         cancel(rKeep);
         rKeep = () -> {
-            if (main != null && !main.isPlaying()
-                    && main.getPlaybackState() != Player.STATE_BUFFERING) {
+            if (player != null
+                    && !player.isPlaying()
+                    && player.getPlaybackState() != Player.STATE_BUFFERING) {
                 recover();
             } else {
                 keepalive();
@@ -271,46 +200,21 @@ public class PlayerActivity extends AppCompatActivity {
         h.postDelayed(rKeep, KEEPALIVE_MS);
     }
 
-    // ════════════════════════════════════════════════════════════
     // Utilitários
-    private ExoPlayer buildPlayer(int bMin, int bMax, int bPlay, int bRebuf, int maxBytes) {
-        LoadControl lc = new DefaultLoadControl.Builder()
-            .setBufferDurationsMs(bMin, bMax, bPlay, bRebuf)
-            .setTargetBufferBytes(maxBytes)
-            .setPrioritizeTimeOverSizeThresholds(true)
-            .build();
-        return new ExoPlayer.Builder(this).setLoadControl(lc).build();
-    }
-
-    private HlsMediaSource hlsSource(String url) {
-        return new HlsMediaSource.Factory(
-            new DefaultHttpDataSource.Factory()
-                .setConnectTimeoutMs(10_000)
-                .setReadTimeoutMs(10_000)
-                .setUserAgent("TVCatolica/5.0"))
-            .createMediaSource(MediaItem.fromUri(Uri.parse(url)));
-    }
-
     private int clamp(int i) {
         if (i < 0) return URLS.length - 1;
         if (i >= URLS.length) return 0;
         return i;
     }
 
-    private void releaseMain() {
+    private void releasePlayer() {
         cancel(rKeep);
-        if (main != null) { main.release(); main = null; }
-    }
-
-    private void releaseAllShadows() {
-        if (shadowNext != null) { shadowNext.release(); shadowNext = null; shadowNextIdx = -1; }
-        if (shadowPrev != null) { shadowPrev.release(); shadowPrev = null; shadowPrevIdx = -1; }
+        if (player != null) { player.release(); player = null; }
     }
 
     private void cancel(Runnable r) { if (r != null) h.removeCallbacks(r); }
 
-    // ════════════════════════════════════════════════════════════
-    // Controle remoto D-Pad
+    // D-Pad
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
         switch (code) {
@@ -334,22 +238,11 @@ public class PlayerActivity extends AppCompatActivity {
         return super.onKeyDown(code, e);
     }
 
-    // ════════════════════════════════════════════════════════════
-    // Ciclo de vida
-    @Override protected void onPause() {
-        super.onPause();
-        if (main != null) main.setPlayWhenReady(false);
-        // Pausar shadows para não gastar RAM
-        if (shadowNext != null) shadowNext.setPlayWhenReady(false);
-        if (shadowPrev != null) shadowPrev.setPlayWhenReady(false);
-    }
-    @Override protected void onResume() {
-        super.onResume();
-        if (main != null) main.setPlayWhenReady(true);
-    }
+    @Override protected void onPause()  { super.onPause();  if (player != null) player.setPlayWhenReady(false); }
+    @Override protected void onResume() { super.onResume(); if (player != null) player.setPlayWhenReady(true);  }
     @Override protected void onDestroy() {
         super.onDestroy();
-        cancel(rKeep); cancel(rTimeout); cancel(rRetry); cancel(rShadow);
-        releaseMain(); releaseAllShadows();
+        cancel(rKeep); cancel(rTimeout); cancel(rRetry);
+        releasePlayer();
     }
 }
