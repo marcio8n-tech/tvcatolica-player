@@ -104,7 +104,8 @@ public class PlayerActivity extends AppCompatActivity {
         playerView = findViewById(R.id.player_main);
         touchArea  = findViewById(R.id.touch_area);
 
-        playerView.setUseController(false);   // tela 100% limpa
+        playerView.setUseController(false);
+        playerView.setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER);
 
         audio = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
 
