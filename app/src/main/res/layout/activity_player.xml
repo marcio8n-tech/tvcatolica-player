@@ -1,16 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <!-- Player principal (tela toda, limpa) -->
+    <!-- Player: tela toda, controller completamente desabilitado via XML -->
     <androidx.media3.ui.PlayerView
         android:id="@+id/player_main"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent"
+        app:use_controller="false"
+        app:show_buffering="never"
+        app:resize_mode="fill"
+        android:clickable="false"
+        android:focusable="false" />
 
-    <!-- Área de toque invisível por cima (detecta swipe e toque) -->
+    <!-- Camada de toque: captura swipe e D-Pad, sem nenhuma UI -->
     <View
         android:id="@+id/touch_area"
         android:layout_width="match_parent"
