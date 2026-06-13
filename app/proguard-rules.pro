@@ -1,0 +1,3 @@
+-keep class com.tvcatolica.player.** { *; }
+-keep class androidx.media3.** { *; }
+-dontwarn androidx.media3.**
