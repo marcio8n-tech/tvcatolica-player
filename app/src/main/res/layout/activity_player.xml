@@ -4,48 +4,19 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <!-- Player principal (tela toda) -->
+    <!-- Player principal (tela toda, limpa) -->
     <androidx.media3.ui.PlayerView
         android:id="@+id/player_main"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Botão ESQUERDA (canal anterior) -->
-    <TextView
-        android:id="@+id/btn_prev"
-        android:layout_width="80dp"
-        android:layout_height="match_parent"
-        android:layout_gravity="start"
-        android:gravity="center"
-        android:text="◀"
-        android:textColor="#AAFFFFFF"
-        android:textSize="36sp"
-        android:background="#33FFFFFF"
-        android:clickable="true"
-        android:focusable="true"
-        android:visibility="gone" />
-
-    <!-- Botão DIREITA (próximo canal) -->
-    <TextView
-        android:id="@+id/btn_next"
-        android:layout_width="80dp"
-        android:layout_height="match_parent"
-        android:layout_gravity="end"
-        android:gravity="center"
-        android:text="▶"
-        android:textColor="#AAFFFFFF"
-        android:textSize="36sp"
-        android:background="#33FFFFFF"
-        android:clickable="true"
-        android:focusable="true"
-        android:visibility="gone" />
-
-    <!-- Overlay de toque (invisível, só detecta gestos) -->
+    <!-- Área de toque invisível por cima (detecta swipe e toque) -->
     <View
         android:id="@+id/touch_area"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:clickable="true"
-        android:focusable="true" />
+        android:focusable="true"
+        android:background="@android:color/transparent" />
 
 </FrameLayout>
